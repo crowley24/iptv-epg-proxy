@@ -1,19 +1,25 @@
+
 /*
- * IPTV EPG Proxy 2.0.0
+ * IPTV EPG Proxy 2.0.1
  * Cloudflare Workers Free
  *
  * POST /epg.xml
  * Body: {"ids":["channel.id"]}
  *
- * Очікувані файли:
- * /processed/channels/<channel-id>.xml
+ * Source:
+ * GitHub Pages preprocessed XMLTV files
  *
- * Кожен файл містить XML-фрагмент каналу
- * та його програми: <channel>...</channel>
- * і <programme>...</programme>
+ * Supported channel file format:
+ * <?xml version="1.0" encoding="UTF-8"?>
+ * <tv>
+ *   <channel>...</channel>
+ *   <programme>...</programme>
+ * </tv>
+ *
+ * Also supports legacy XML fragments without <tv>.
  */
 
-const VERSION = "2.0.0";
+const VERSION = "2.0.1";
 const MAX_CHANNEL_IDS = 40;
 const REQUEST_TIMEOUT_MS = 10000;
 
@@ -27,7 +33,11 @@ const CORS_HEADERS = {
     "Cache-Control": "no-store"
 };
 
-function response(body, status = 200, contentType = "text/plain; charset=utf-8") {
+function response(
+    body,
+    status = 200,
+    contentType = "text/plain; charset=utf-8"
+) {
     return new Response(body, {
         status,
         headers: {
@@ -38,7 +48,11 @@ function response(body, status = 200, contentType = "text/plain; charset=utf-8")
 }
 
 function json(data, status = 200) {
-    return response(JSON.stringify(data), status, "application/json; charset=utf-8");
+    return response(
+        JSON.stringify(data),
+        status,
+        "application/json; charset=utf-8"
+    );
 }
 
 function validId(id) {
@@ -50,22 +64,105 @@ function validId(id) {
     );
 }
 
-function escapeXmlAttribute(value) {
-    return String(value)
-        .replace(/&/g, "&amp;")
-        .replace(/"/g, "&quot;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;");
-}
-
 function safeFilename(id) {
     return encodeURIComponent(id);
+}
+
+/*
+ * Normalizes channel XML.
+ *
+ * Removes:
+ * - UTF-8 BOM
+ * - XML declaration
+ * - DOCTYPE declaration
+ * - outer <tv> wrapper
+ *
+ * Keeps:
+ * - <channel>
+ * - <programme>
+ *
+ * Supports both complete XMLTV documents
+ * and legacy channel fragments.
+ */
+function normalizeChannelXml(xml, id) {
+    if (typeof xml !== "string" || !xml.trim()) {
+        throw new Error(
+            "Порожній XML-файл каналу: " + id
+        );
+    }
+
+    let content = xml.replace(/^\uFEFF/, "").trim();
+
+    // Remove XML declaration.
+    content = content.replace(
+        /^<\?xml\s+[\s\S]*?\?>\s*/i,
+        ""
+    );
+
+    // Remove optional DOCTYPE declaration.
+    content = content.replace(
+        /^<!DOCTYPE\s+tv(?:\s+[^>]*?)?>\s*/i,
+        ""
+    );
+
+    // Remove optional XML comments before the root.
+    content = content.replace(
+        /^(?:\s*<!--[\s\S]*?-->\s*)+/,
+        ""
+    );
+
+    /*
+     * Detect a complete XMLTV document.
+     * The wrapper must enclose the entire file.
+     */
+    if (/^<tv(?:\s[^>]*)?>/i.test(content)) {
+        const openingTag = content.match(
+            /^<tv(?:\s[^>]*)?>/i
+        );
+
+        if (!/<\/tv>\s*$/i.test(content)) {
+            throw new Error(
+                "Не знайдено закривальний тег </tv>: " + id
+            );
+        }
+
+        content = content
+            .slice(openingTag[0].length)
+            .replace(/<\/tv>\s*$/i, "")
+            .trim();
+    }
+
+    // Nested or unexpected <tv> tags are not allowed.
+    if (/<\/?tv(?:\s|>)/i.test(content)) {
+        throw new Error(
+            "Некоректна структура XMLTV: " + id
+        );
+    }
+
+    // XML declarations must not appear inside the result.
+    if (/<\?xml(?:\s|\?>)/i.test(content)) {
+        throw new Error(
+            "Зайва XML-декларація: " + id
+        );
+    }
+
+    if (
+        !/<channel(?:\s|>)/i.test(content) ||
+        !/<\/channel>/i.test(content)
+    ) {
+        throw new Error(
+            "Не знайдено опис каналу: " + id
+        );
+    }
+
+    return content;
 }
 
 async function fetchChannel(id) {
     const url = DATA_BASE + safeFilename(id) + ".xml";
 
     const controller = new AbortController();
+
     const timeout = setTimeout(
         () => controller.abort(),
         REQUEST_TIMEOUT_MS
@@ -94,33 +191,24 @@ async function fetchChannel(id) {
 
         if (!result.ok) {
             throw new Error(
-                "HTTP " + result.status + " для каналу " + id
+                "HTTP " + result.status +
+                " для каналу " + id
             );
         }
 
-        const xml = await result.text();
+        const rawXml = await result.text();
 
-        if (
-            !/<channel(?:\s|>)/i.test(xml) ||
-            !/<\/channel>/i.test(xml)
-        ) {
-            throw new Error(
-                "Некоректний XML-фрагмент для каналу " + id
-            );
-        }
-
-        // Не дозволяємо вставити зовнішню оболонку <tv>.
-        if (/<\/?tv(?:\s|>)/i.test(xml)) {
-            throw new Error(
-                "Файл каналу містить заборонений тег tv: " + id
-            );
-        }
+        const normalizedXml = normalizeChannelXml(
+            rawXml,
+            id
+        );
 
         return {
             id,
             found: true,
-            xml
+            xml: normalizedXml
         };
+
     } finally {
         clearTimeout(timeout);
     }
@@ -134,6 +222,7 @@ async function handlePost(request) {
     } catch {
         return json({
             success: false,
+            version: VERSION,
             error: "Тіло запиту має бути JSON."
         }, 400);
     }
@@ -141,7 +230,9 @@ async function handlePost(request) {
     if (!body || !Array.isArray(body.ids)) {
         return json({
             success: false,
-            error: 'Очікується JSON формату {"ids":["channel.id"]}.'
+            version: VERSION,
+            error:
+                'Очікується JSON формату {"ids":["channel.id"]}.'
         }, 400);
     }
 
@@ -150,6 +241,7 @@ async function handlePost(request) {
     if (ids.length === 0) {
         return json({
             success: false,
+            version: VERSION,
             error: "Список channel IDs порожній."
         }, 400);
     }
@@ -157,14 +249,11 @@ async function handlePost(request) {
     if (ids.some(id => !validId(id))) {
         return json({
             success: false,
+            version: VERSION,
             error: "Список містить некоректний channel ID."
         }, 400);
     }
 
-    /*
-     * Workers Free має обмеження на зовнішні підзапити.
-     * Не намагаємося завантажити тисячі файлів за один виклик.
-     */
     if (ids.length > MAX_CHANNEL_IDS) {
         return json({
             success: false,
@@ -179,31 +268,55 @@ async function handlePost(request) {
     let results;
 
     try {
-        results = await Promise.all(ids.map(fetchChannel));
+        results = await Promise.all(
+            ids.map(fetchChannel)
+        );
     } catch (error) {
         return json({
             success: false,
             version: VERSION,
-            error: "Не вдалося отримати підготовлені EPG-файли.",
+            error:
+                "Не вдалося отримати підготовлені EPG-файли.",
             details: String(error.message || error)
         }, 502);
     }
 
-    const found = results.filter(item => item.found);
+    const found = results.filter(
+        item => item.found
+    );
+
     const missing = results
         .filter(item => !item.found)
         .map(item => item.id);
 
-    const xmlParts = found.map(item => item.xml).join("\n");
+    if (found.length === 0) {
+        return json({
+            success: false,
+            version: VERSION,
+            error:
+                "Не знайдено EPG-файлів для запитаних каналів.",
+            requested: ids.length,
+            missing
+        }, 404);
+    }
+
+    const xmlParts = found
+        .map(item => item.xml)
+        .join("\n");
 
     const xml =
         '<?xml version="1.0" encoding="UTF-8"?>\n' +
         '<tv generator-info-name="IPTV EPG Proxy ' +
-        VERSION + '">\n' +
+        VERSION +
+        '">\n' +
         xmlParts +
-        "\n</tv>";
+        "\n</tv>\n";
 
-    return response(xml, 200, "application/xml; charset=utf-8");
+    return response(
+        xml,
+        200,
+        "application/xml; charset=utf-8"
+    );
 }
 
 async function handleRequest(request) {
@@ -224,6 +337,8 @@ async function handleRequest(request) {
             mode: "preprocessed-channel-files",
             source: DATA_BASE,
             maxChannelIds: MAX_CHANNEL_IDS,
+            channelFileFormat: "complete-xmltv",
+            supportsLegacyFragments: true,
             fullXmltvFallback: false
         });
     }
@@ -231,6 +346,7 @@ async function handleRequest(request) {
     if (url.pathname !== "/epg.xml") {
         return json({
             success: false,
+            version: VERSION,
             error: "Endpoint не знайдено."
         }, 404);
     }
@@ -244,12 +360,14 @@ async function handleRequest(request) {
             success: false,
             version: VERSION,
             error: "Повний XMLTV через GET вимкнено.",
-            hint: "Надсилайте POST із масивом ids."
+            hint:
+                "Надсилайте POST із масивом ids."
         }, 405);
     }
 
     return json({
         success: false,
+        version: VERSION,
         error: "Метод не підтримується."
     }, 405);
 }
@@ -263,7 +381,9 @@ export default {
                 success: false,
                 version: VERSION,
                 error: "Внутрішня помилка Worker.",
-                details: String(error.message || error)
+                details: String(
+                    error.message || error
+                )
             }, 500);
         }
     }
