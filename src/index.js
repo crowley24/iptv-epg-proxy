@@ -1,3 +1,4 @@
+ // Auto-deploy test
 const EPG_URL = 'http://only4.tv/epg/epg.xml';
 
 function corsHeaders() {
