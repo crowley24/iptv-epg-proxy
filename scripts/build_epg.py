@@ -294,8 +294,24 @@ def export_channel_files(db):
             newline="\n",
         ) as output:
             output.write(XML_DECLARATION)
-            output.write(channel_xml)
-            output.write("\n")
+output.write('<tv generator-info-name="IPTV EPG Proxy">\n')
+output.write(channel_xml)
+output.write("\n")
+
+programmes = db.execute(
+    """
+    SELECT xml
+    FROM programmes
+    WHERE channel_id = ?
+    """,
+    (channel_id,),
+)
+
+for (programme_xml,) in programmes:
+    output.write(programme_xml)
+    output.write("\n")
+
+output.write("</tv>\n")
 
             programmes = db.execute(
                 """
