@@ -1,4 +1,4 @@
-// Auto-deploy test
+
 // IPTV EPG Proxy 1.2.0
 // Modes:
 // GET  /epg.xml       -> full XMLTV, streamed
