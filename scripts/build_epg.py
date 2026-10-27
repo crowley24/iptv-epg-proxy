@@ -1,4 +1,3 @@
-```python
 #!/usr/bin/env python3
 
 import sys
@@ -412,4 +411,3 @@ if __name__ == "__main__":
     except Exception as error:
         log(f"ПОМИЛКА: {error}")
         sys.exit(1)
-```
