@@ -17,9 +17,8 @@ const VERSION = "2.0.0";
 const MAX_CHANNEL_IDS = 40;
 const REQUEST_TIMEOUT_MS = 10000;
 
-// Заміни на адресу каталогу з підготовленими XML-файлами.
 const DATA_BASE =
-    "https://crowley24.github.io/EPG/processed/channels/";
+    "https://crowley24.github.io/iptv-epg-proxy/processed/channels/";
 
 const CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
